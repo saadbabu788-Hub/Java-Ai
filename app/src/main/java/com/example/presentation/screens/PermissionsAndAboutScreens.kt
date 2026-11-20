@@ -24,6 +24,8 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -34,6 +36,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,9 +60,17 @@ import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.TextSecondary
 
+private enum class PendingPermissionRationale {
+    ACCESSIBILITY,
+    MICROPHONE,
+    NOTIFICATIONS
+}
+
 @Composable
 fun PermissionsScreen(
     permissions: PermissionSnapshot,
+    screenContextConsentAccepted: Boolean,
+    onToggleScreenContextConsent: (Boolean) -> Unit,
     onRefresh: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestMicrophone: () -> Unit,
@@ -64,6 +78,57 @@ fun PermissionsScreen(
     onOpenAppSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var activeRationale by remember { mutableStateOf<PendingPermissionRationale?>(null) }
+
+    activeRationale?.let { rationale ->
+        val (title, body, proceedLabel, onProceed) = when (rationale) {
+            PendingPermissionRationale.ACCESSIBILITY -> Quad(
+                "Enable Accessibility UI Operator",
+                "Android will open Accessibility Settings so you can manually enable AuraPilot.\n\n" +
+                    "• Screen layouts are read ONLY while an explicit command is running.\n" +
+                    "• Password fields, lockscreens, installers, permission dialogs, and payment prompts are strictly blocked.\n" +
+                    "• You can disable this service anytime.",
+                "Open Android Settings",
+                onOpenAccessibilitySettings
+            )
+            PendingPermissionRationale.MICROPHONE -> Quad(
+                "Microphone Access",
+                "Allows AuraPilot to record speech ONLY when you tap the Microphone button to dictate commands.\n\n" +
+                    "No background or passive listening occurs, and you can revoke this permission anytime in App Settings.",
+                "Continue to Prompt",
+                onRequestMicrophone
+            )
+            PendingPermissionRationale.NOTIFICATIONS -> Quad(
+                "Task Runner Notifications",
+                "Lets AuraPilot display a visible ongoing notification with an Emergency Stop button whenever an automation task is active.",
+                "Continue to Prompt",
+                onRequestNotifications
+            )
+        }
+
+        AlertDialog(
+            onDismissRequest = { activeRationale = null },
+            containerColor = ObsidianCard,
+            title = { Text(title, style = MaterialTheme.typography.headlineSmall) },
+            text = { Text(body, style = MaterialTheme.typography.bodyMedium, color = TextSecondary) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        activeRationale = null
+                        onProceed()
+                    }
+                ) {
+                    Text(proceedLabel)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { activeRationale = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -84,9 +149,9 @@ fun PermissionsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Permissions", style = MaterialTheme.typography.headlineMedium)
+                        Text("Permissions & Privacy", style = MaterialTheme.typography.headlineMedium)
                         Text(
-                            "AuraPilot never enables or hides permissions automatically. Review and grant only what you want to use.",
+                            "AuraPilot never enables or hides permissions automatically. Review, grant, or revoke access anytime.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondary
                         )
@@ -109,11 +174,30 @@ fun PermissionsScreen(
                     icon = Icons.Default.AccessibilityNew,
                     title = "Accessibility UI Operator",
                     granted = permissions.isAccessibilityEnabled,
-                    whyNeeded = "Required so AuraPilot can inspect visible screen layouts (buttons, search bars, page text) and execute taps, scrolling, and text input when you issue an automation command.",
-                    privacyNote = "Password fields are strictly masked and never read or sent to Gemini. You can disable this service anytime in Android Accessibility Settings.",
-                    actionLabel = if (permissions.isAccessibilityEnabled) "Manage in Settings" else "Open Accessibility Settings",
-                    onAction = onOpenAccessibilitySettings,
+                    whyNeeded = "Required so AuraPilot can inspect visible screen layouts (buttons, search bars, page text) and execute taps, scrolling, and text input ONLY when you run an automation command.",
+                    privacyNote = "Zero background scraping when idle. Password fields, lockscreens, installers, and permission prompts are strictly blocked. Disable anytime in Android Accessibility Settings.",
+                    actionLabel = if (permissions.isAccessibilityEnabled) "Manage / Revoke in Settings" else "Open Accessibility Settings",
+                    onAction = {
+                        if (permissions.isAccessibilityEnabled) {
+                            onOpenAccessibilitySettings()
+                        } else {
+                            activeRationale = PendingPermissionRationale.ACCESSIBILITY
+                        }
+                    },
                     testTag = "accessibility_permission_button"
+                )
+            }
+
+            item {
+                PermissionCard(
+                    icon = Icons.Default.Visibility,
+                    title = "AI Screen Context Consent",
+                    granted = screenContextConsentAccepted,
+                    whyNeeded = "Controls whether non-sensitive UI text during active commands may be sent to Google Gemini using your own API key.",
+                    privacyNote = "Never sends data when idle or on protected screens. You can revoke this consent immediately with one tap.",
+                    actionLabel = if (screenContextConsentAccepted) "Revoke AI Screen Consent" else "Grant AI Screen Consent",
+                    onAction = { onToggleScreenContextConsent(!screenContextConsentAccepted) },
+                    testTag = "screen_context_consent_button"
                 )
             }
 
@@ -125,7 +209,13 @@ fun PermissionsScreen(
                     whyNeeded = "Used exclusively when you tap the Microphone button to dictate commands in English, Hindi, or Hinglish via Android SpeechRecognizer.",
                     privacyNote = "No passive background listening occurs when the microphone is idle.",
                     actionLabel = if (permissions.isMicrophoneGranted) "Revoke in App Settings" else "Grant Microphone Access",
-                    onAction = if (permissions.isMicrophoneGranted) onOpenAppSettings else onRequestMicrophone,
+                    onAction = {
+                        if (permissions.isMicrophoneGranted) {
+                            onOpenAppSettings()
+                        } else {
+                            activeRationale = PendingPermissionRationale.MICROPHONE
+                        }
+                    },
                     testTag = "microphone_permission_button"
                 )
             }
@@ -138,13 +228,26 @@ fun PermissionsScreen(
                     whyNeeded = "Displays a live foreground indicator with an Emergency Stop button while AuraPilot runs multi-step actions across other apps.",
                     privacyNote = "Only shown while an automation task is actively executing.",
                     actionLabel = if (permissions.isNotificationsGranted) "Manage in App Settings" else "Grant Notification Access",
-                    onAction = if (permissions.isNotificationsGranted) onOpenAppSettings else onRequestNotifications,
+                    onAction = {
+                        if (permissions.isNotificationsGranted) {
+                            onOpenAppSettings()
+                        } else {
+                            activeRationale = PendingPermissionRationale.NOTIFICATIONS
+                        }
+                    },
                     testTag = "notifications_permission_button"
                 )
             }
         }
     }
 }
+
+private data class Quad(
+    val title: String,
+    val body: String,
+    val confirmLabel: String,
+    val onConfirm: () -> Unit
+)
 
 @Composable
 private fun PermissionCard(

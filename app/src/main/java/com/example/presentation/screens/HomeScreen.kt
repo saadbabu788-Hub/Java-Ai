@@ -34,8 +34,10 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledIconButton
@@ -43,6 +45,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -50,6 +53,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -100,11 +107,15 @@ fun HomeScreen(
     onStopClick: () -> Unit,
     onNewSession: () -> Unit,
     onApproveConfirmation: (Boolean) -> Unit,
+    onApproveScreenContextConsent: () -> Unit,
+    onDismissScreenContextConsent: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToPermissions: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
+    var showMicRationale by remember { mutableStateOf(false) }
+
     LaunchedEffect(uiState.sessionMessages.size) {
         if (uiState.sessionMessages.isNotEmpty()) {
             listState.animateScrollToItem(uiState.sessionMessages.lastIndex)
@@ -123,6 +134,82 @@ fun HomeScreen(
             pending = pending,
             onApprove = { onApproveConfirmation(true) },
             onDeny = { onApproveConfirmation(false) }
+        )
+    }
+
+    if (uiState.pendingConsentCommand != null) {
+        AlertDialog(
+            onDismissRequest = onDismissScreenContextConsent,
+            containerColor = ObsidianCard,
+            title = {
+                Text(
+                    text = "AI Screen Context Disclosure",
+                    style = MaterialTheme.typography.headlineSmall
+                )
+            },
+            text = {
+                Text(
+                    text = "To plan UI steps, AuraPilot sends visible, non-sensitive UI layout text from the active screen to Google Gemini using your configured API key ONLY while your command is running.\n\n" +
+                        "• Zero background monitoring when idle.\n" +
+                        "• Passwords, OTPs, lockscreens, permission prompts, and installers are strictly blocked.\n" +
+                        "• You can tap Stop or revoke consent anytime in the Access tab.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = onApproveScreenContextConsent,
+                    modifier = Modifier.testTag("approve_screen_consent_button")
+                ) {
+                    Text("Allow & Run")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = onDismissScreenContextConsent,
+                    modifier = Modifier.testTag("cancel_screen_consent_button")
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showMicRationale) {
+        AlertDialog(
+            onDismissRequest = { showMicRationale = false },
+            containerColor = ObsidianCard,
+            title = {
+                Text(
+                    text = "Microphone Access for Voice Commands",
+                    style = MaterialTheme.typography.headlineSmall
+                )
+            },
+            text = {
+                Text(
+                    text = "AuraPilot uses your microphone ONLY when you tap the Mic button to transcribe your voice command (English, Hindi, or Hinglish).\n\n" +
+                        "No passive or background listening ever runs when the microphone is idle. You can revoke Microphone access anytime in App Settings.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showMicRationale = false
+                        onMicClick()
+                    },
+                    modifier = Modifier.testTag("confirm_mic_rationale_button")
+                ) {
+                    Text("Continue")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showMicRationale = false }) {
+                    Text("Not Now")
+                }
+            }
         )
     }
 
@@ -321,7 +408,13 @@ fun HomeScreen(
                     // Large Microphone Button
                     val micActive = uiState.voice.isListening
                     FilledIconButton(
-                        onClick = onMicClick,
+                        onClick = {
+                            if (micActive || uiState.permissions.isMicrophoneGranted) {
+                                onMicClick()
+                            } else {
+                                showMicRationale = true
+                            }
+                        },
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = if (micActive) ListeningViolet else CyanContainer,
                             contentColor = if (micActive) Color.White else ElectricCyan

@@ -111,6 +111,7 @@ fun AuraPilotApp(container: AppContainer) {
     val tasksState by tasksViewModel.uiState.collectAsStateWithLifecycle()
     val settingsState by settingsViewModel.uiState.collectAsStateWithLifecycle()
     val permissionsState by permissionsViewModel.permissions.collectAsStateWithLifecycle()
+    val screenContextConsent by permissionsViewModel.screenContextConsentAccepted.collectAsStateWithLifecycle()
 
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -262,6 +263,8 @@ fun AuraPilotApp(container: AppContainer) {
                             onStopClick = homeViewModel::stopExecution,
                             onNewSession = homeViewModel::startNewSession,
                             onApproveConfirmation = homeViewModel::respondToConfirmation,
+                            onApproveScreenContextConsent = homeViewModel::approveScreenContextConsentAndRun,
+                            onDismissScreenContextConsent = homeViewModel::dismissScreenContextConsent,
                             onNavigateToSettings = { navigateTo(Routes.ROUTE_SETTINGS) },
                             onNavigateToPermissions = { navigateTo(Routes.ROUTE_PERMISSIONS) }
                         )
@@ -311,6 +314,8 @@ fun AuraPilotApp(container: AppContainer) {
                     composable(Routes.ROUTE_PERMISSIONS) {
                         PermissionsScreen(
                             permissions = permissionsState,
+                            screenContextConsentAccepted = screenContextConsent,
+                            onToggleScreenContextConsent = permissionsViewModel::setScreenContextConsent,
                             onRefresh = permissionsViewModel::refresh,
                             onOpenAccessibilitySettings = permissionsViewModel::openAccessibilitySettings,
                             onRequestMicrophone = {

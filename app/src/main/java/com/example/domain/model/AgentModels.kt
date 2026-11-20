@@ -140,6 +140,7 @@ data class AiSettings(
     val voiceFeedbackEnabled: Boolean = true,
     val voiceLanguage: VoiceLanguage = VoiceLanguage.AUTO,
     val requireSensitiveConfirmation: Boolean = true,
+    val screenContextConsentAccepted: Boolean = false,
     val totalPromptTokens: Long = 0L,
     val totalCompletionTokens: Long = 0L
 ) {

@@ -128,6 +128,98 @@ class AuraCoreUnitTest {
         assertTrue(masked.contains("••••"))
     }
 
+    @Test
+    fun `screen hierarchy parser detects protected security and credential screens`() {
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveScreen("com.android.packageinstaller", ""))
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveScreen("com.google.android.permissioncontroller", ""))
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveScreen("com.x8bit.bitwarden", ""))
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveScreen("com.android.settings", "com.android.settings.biometrics.BiometricPrompt"))
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveScreen("com.any.app", "KeyguardHostView"))
+        assertTrue(!com.example.accessibility.ScreenHierarchyParser.isSensitiveScreen("com.google.android.youtube", "HomeActivity"))
+    }
+
+    @Test
+    fun `screen hierarchy parser detects sensitive field metadata`() {
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveFieldMetadata(true, "", ""))
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveFieldMetadata(false, "com.app:id/otp_input", ""))
+        assertTrue(com.example.accessibility.ScreenHierarchyParser.isSensitiveFieldMetadata(false, "", "Enter PIN code"))
+        assertTrue(!com.example.accessibility.ScreenHierarchyParser.isSensitiveFieldMetadata(false, "com.app:id/search_box", "Search videos"))
+    }
+
+    @Test
+    fun `protected screen snapshot redacts prompt text and readable content`() {
+        val snapshot = ScreenSnapshot(
+            packageName = "com.google.android.permissioncontroller",
+            className = "GrantPermissionsActivity",
+            timestamp = 1L,
+            nodes = emptyList(),
+            visibleTextLines = listOf("Should never appear"),
+            isProtectedScreen = true
+        )
+        assertTrue(snapshot.toPromptText().contains("PROTECTED_SENSITIVE_SCREEN=true"))
+        assertEquals("", snapshot.fullReadableText())
+    }
+
+    @Test
+    fun `accessibility bridge drops and clears snapshots when automation is inactive`() {
+        val sample = ScreenSnapshot(
+            packageName = "com.example.demo",
+            className = "MainActivity",
+            timestamp = 1L,
+            nodes = emptyList(),
+            visibleTextLines = listOf("Hello")
+        )
+        com.example.accessibility.AccessibilityBridge.setAutomationActive(false)
+        com.example.accessibility.AccessibilityBridge.updateSnapshot(sample)
+        assertEquals(null, com.example.accessibility.AccessibilityBridge.latestSnapshot.value)
+
+        com.example.accessibility.AccessibilityBridge.setAutomationActive(true)
+        com.example.accessibility.AccessibilityBridge.updateSnapshot(sample)
+        assertEquals("com.example.demo", com.example.accessibility.AccessibilityBridge.latestSnapshot.value?.packageName)
+
+        com.example.accessibility.AccessibilityBridge.setAutomationActive(false)
+        assertEquals(null, com.example.accessibility.AccessibilityBridge.latestSnapshot.value)
+    }
+
+    @Test
+    fun `url validator enforces public https and rejects unsafe schemes or local addresses`() {
+        assertEquals("https://wikipedia.org", com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("wikipedia.org"))
+        assertEquals("https://developer.android.com/guide", com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("https://developer.android.com/guide"))
+        assertEquals(null, com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("http://insecure.example.com"))
+        assertEquals(null, com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("javascript:alert(1)"))
+        assertEquals(null, com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("file:///etc/passwd"))
+        assertEquals(null, com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("intent://scan/#Intent;end"))
+        assertEquals(null, com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("https://127.0.0.1/admin"))
+        assertEquals(null, com.example.automation.InstalledAppsHelper.validateAndNormalizeHttpsUrl("https://192.168.1.1"))
+    }
+
+    @Test
+    fun `safety guard blocks protected screens and non-https open url actions`() {
+        val protectedSnap = ScreenSnapshot(
+            packageName = "com.android.packageinstaller",
+            className = "PackageInstallerActivity",
+            timestamp = 1L,
+            nodes = emptyList(),
+            visibleTextLines = emptyList(),
+            isProtectedScreen = true
+        )
+        val tapDecision = AgentDecision(
+            thought = "Tap Allow",
+            planSteps = listOf("Tap Allow"),
+            action = ActionType.TAP_TEXT,
+            targetText = "Allow"
+        )
+        assertTrue(SafetyGuard.evaluate(tapDecision, protectedSnap, true) is SafetyCheckResult.Blocked)
+
+        val unsafeUrlDecision = AgentDecision(
+            thought = "Open local URL",
+            planSteps = listOf("Open URL"),
+            action = ActionType.OPEN_URL,
+            url = "http://127.0.0.1:8080"
+        )
+        assertTrue(SafetyGuard.evaluate(unsafeUrlDecision, null, true) is SafetyCheckResult.Blocked)
+    }
+
     private class FakeGeminiApiService(
         private val listModelsResponse: Response<ModelsListResponse> = Response.success(
             ModelsListResponse(

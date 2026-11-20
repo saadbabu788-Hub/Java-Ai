@@ -47,6 +47,7 @@ class SettingsRepository(
         val VOICE_FEEDBACK = booleanPreferencesKey("voice_feedback")
         val VOICE_LANGUAGE = stringPreferencesKey("voice_language")
         val REQUIRE_CONFIRMATION = booleanPreferencesKey("require_confirmation")
+        val SCREEN_CONTEXT_CONSENT = booleanPreferencesKey("screen_context_consent_accepted")
         val TOTAL_PROMPT_TOKENS = longPreferencesKey("total_prompt_tokens")
         val TOTAL_COMPLETION_TOKENS = longPreferencesKey("total_completion_tokens")
     }
@@ -91,6 +92,7 @@ class SettingsRepository(
             voiceFeedbackEnabled = prefs[Keys.VOICE_FEEDBACK] ?: true,
             voiceLanguage = voiceLang,
             requireSensitiveConfirmation = prefs[Keys.REQUIRE_CONFIRMATION] ?: true,
+            screenContextConsentAccepted = prefs[Keys.SCREEN_CONTEXT_CONSENT] ?: false,
             totalPromptTokens = prefs[Keys.TOTAL_PROMPT_TOKENS] ?: 0L,
             totalCompletionTokens = prefs[Keys.TOTAL_COMPLETION_TOKENS] ?: 0L
         )
@@ -178,6 +180,12 @@ class SettingsRepository(
     suspend fun updateRequireConfirmation(enabled: Boolean) {
         context.settingsDataStore.edit { prefs ->
             prefs[Keys.REQUIRE_CONFIRMATION] = enabled
+        }
+    }
+
+    suspend fun updateScreenContextConsent(accepted: Boolean) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[Keys.SCREEN_CONTEXT_CONSENT] = accepted
         }
     }
 

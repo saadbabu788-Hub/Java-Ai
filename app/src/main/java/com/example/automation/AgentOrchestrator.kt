@@ -74,6 +74,8 @@ class AgentOrchestrator(
     val engineState: StateFlow<AgentEngineState> = _engineState.asStateFlow()
 
     private var activeJob: Job? = null
+    @Volatile
+    private var activeRunId: String? = null
     private var confirmationDeferred: CompletableDeferred<Boolean>? = null
 
     init {
@@ -144,7 +146,10 @@ class AgentOrchestrator(
                 )
             )
 
-            AgentForegroundService.startOrUpdate(context, "Planning: $command")
+            val currentRunId = UUID.randomUUID().toString()
+            activeRunId = currentRunId
+            AccessibilityBridge.setAutomationActive(true)
+            AgentForegroundService.startOrUpdate(context, "Planning task (${command.take(48)})")
 
             val stepHistory = mutableListOf<String>()
             val executionSteps = mutableListOf<ExecutionStep>()
@@ -164,6 +169,26 @@ class AgentOrchestrator(
 
                     val service = AccessibilityBridge.activeService
                     val snapshot: ScreenSnapshot? = service?.captureFreshSnapshot()
+
+                    if (snapshot?.isProtectedScreen == true) {
+                        val protectedMsg = "Paused for security: AuraPilot does not inspect or automate protected screens (${snapshot.packageName})."
+                        _engineState.value = _engineState.value.copy(
+                            status = AgentStatus.FAILED,
+                            currentActionDescription = protectedMsg,
+                            lastError = protectedMsg
+                        )
+                        taskDao.updateTaskProgress(
+                            id = taskId,
+                            status = TaskRunStatus.FAILED.name,
+                            stepIndex = stepNumber - 1,
+                            stepsJson = stringListAdapter.toJson(lastPlannedLabels),
+                            summary = protectedMsg,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                        postAssistantMessage(sessionId, protectedMsg, "Protected Screen")
+                        if (settings.voiceFeedbackEnabled) voiceManager.speak(protectedMsg, settings.voiceLanguage)
+                        return@launch
+                    }
 
                     val decisionResult = geminiClient.planNextStep(
                         apiKey = apiKey,
@@ -383,8 +408,28 @@ class AgentOrchestrator(
                                 status = AgentStatus.EXECUTING,
                                 currentActionDescription = "Reading visible screen content & summarizing..."
                             )
-                            val freshText = service?.captureFreshSnapshot()?.fullReadableText()
-                                ?: snapshot?.fullReadableText().orEmpty()
+                            val latestReadSnapshot = service?.captureFreshSnapshot() ?: snapshot
+                            if (latestReadSnapshot?.isProtectedScreen == true) {
+                                val protectedMsg = "Protected screen detected — AuraPilot never reads or summarizes sensitive screens."
+                                markLastStep(executionSteps, StepStatus.FAILED)
+                                _engineState.value = _engineState.value.copy(
+                                    status = AgentStatus.FAILED,
+                                    plannedSteps = executionSteps.toList(),
+                                    currentActionDescription = protectedMsg,
+                                    lastError = protectedMsg
+                                )
+                                taskDao.updateTaskProgress(
+                                    id = taskId,
+                                    status = TaskRunStatus.FAILED.name,
+                                    stepIndex = stepNumber - 1,
+                                    stepsJson = stringListAdapter.toJson(lastPlannedLabels),
+                                    summary = protectedMsg,
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                                postAssistantMessage(sessionId, protectedMsg, "Protected Screen")
+                                return@launch
+                            }
+                            val freshText = latestReadSnapshot?.fullReadableText().orEmpty()
 
                             val summaryText = if (freshText.isBlank()) {
                                 decision.spokenMessage ?: "No readable text found on the current screen."
@@ -511,7 +556,11 @@ class AgentOrchestrator(
                 )
                 postAssistantMessage(sessionId, stoppedMsg, "Stopped")
             } finally {
-                AgentForegroundService.stop(context)
+                if (activeRunId == currentRunId) {
+                    activeRunId = null
+                    AccessibilityBridge.setAutomationActive(false)
+                    AgentForegroundService.stop(context)
+                }
             }
         }
     }
@@ -521,6 +570,8 @@ class AgentOrchestrator(
     }
 
     fun stopExecution() {
+        activeRunId = null
+        AccessibilityBridge.setAutomationActive(false)
         voiceManager.stopListening()
         voiceManager.stopSpeaking()
         confirmationDeferred?.complete(false)

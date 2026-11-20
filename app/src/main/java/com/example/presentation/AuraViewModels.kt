@@ -42,7 +42,8 @@ data class HomeUiState(
     val permissions: PermissionSnapshot = PermissionSnapshot(),
     val sessionMessages: List<ChatMessage> = emptyList(),
     val commandInput: String = "",
-    val currentPackageName: String = ""
+    val currentPackageName: String = "",
+    val pendingConsentCommand: String? = null
 ) {
     val effectiveStatus: AgentStatus
         get() = if (voice.isListening) AgentStatus.LISTENING else engine.status
@@ -57,6 +58,7 @@ class HomeViewModel(
 ) : ViewModel() {
 
     private val _commandInput = MutableStateFlow("")
+    private val _pendingConsentCommand = MutableStateFlow<String?>(null)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val sessionMessagesFlow = orchestrator.engineState
@@ -70,7 +72,8 @@ class HomeViewModel(
         permissionManager.permissions,
         sessionMessagesFlow,
         _commandInput,
-        AccessibilityBridge.latestSnapshot
+        AccessibilityBridge.latestSnapshot,
+        _pendingConsentCommand
     ) { values ->
         val engine = values[0] as AgentEngineState
         val voice = values[1] as VoiceState
@@ -80,6 +83,7 @@ class HomeViewModel(
         val messages = values[4] as List<ChatMessage>
         val input = values[5] as String
         val snapshot = values[6] as com.example.accessibility.ScreenSnapshot?
+        val pendingConsent = values[7] as String?
 
         HomeUiState(
             engine = engine,
@@ -88,7 +92,8 @@ class HomeViewModel(
             permissions = permissions,
             sessionMessages = messages,
             commandInput = input,
-            currentPackageName = snapshot?.packageName.orEmpty()
+            currentPackageName = snapshot?.packageName.orEmpty(),
+            pendingConsentCommand = pendingConsent
         )
     }.stateIn(
         scope = viewModelScope,
@@ -104,12 +109,38 @@ class HomeViewModel(
         val text = _commandInput.value.trim()
         if (text.isEmpty()) return
         _commandInput.value = ""
-        orchestrator.submitCommand(text)
+        submitWithConsentCheck(text)
     }
 
     fun submitQuickCommand(command: String) {
         _commandInput.value = ""
-        orchestrator.submitCommand(command)
+        submitWithConsentCheck(command)
+    }
+
+    private fun submitWithConsentCheck(command: String) {
+        val trimmed = command.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val consented = settingsRepository.settingsFlow.first().screenContextConsentAccepted
+            if (consented) {
+                orchestrator.submitCommand(trimmed)
+            } else {
+                _pendingConsentCommand.value = trimmed
+            }
+        }
+    }
+
+    fun approveScreenContextConsentAndRun() {
+        val pending = _pendingConsentCommand.value ?: return
+        _pendingConsentCommand.value = null
+        viewModelScope.launch {
+            settingsRepository.updateScreenContextConsent(true)
+            orchestrator.submitCommand(pending)
+        }
+    }
+
+    fun dismissScreenContextConsent() {
+        _pendingConsentCommand.value = null
     }
 
     fun startVoiceListening() {
@@ -119,7 +150,7 @@ class HomeViewModel(
                 language = lang,
                 onResult = { transcript ->
                     _commandInput.value = ""
-                    orchestrator.submitCommand(transcript)
+                    submitWithConsentCheck(transcript)
                 },
                 onError = { _ -> }
             )
@@ -362,10 +393,18 @@ class SettingsViewModel(
 }
 
 class PermissionsViewModel(
-    private val permissionManager: PermissionManager
+    private val permissionManager: PermissionManager,
+    private val settingsRepository: SettingsRepository
 ) : ViewModel() {
 
     val permissions: StateFlow<PermissionSnapshot> = permissionManager.permissions
+    val screenContextConsentAccepted: StateFlow<Boolean> = settingsRepository.settingsFlow
+        .map { it.screenContextConsentAccepted }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = false
+        )
 
     fun refresh() {
         permissionManager.refresh()
@@ -377,6 +416,12 @@ class PermissionsViewModel(
 
     fun openAppSettings() {
         permissionManager.openAppSettings()
+    }
+
+    fun setScreenContextConsent(accepted: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.updateScreenContextConsent(accepted)
+        }
     }
 }
 
@@ -404,7 +449,8 @@ class AuraViewModelFactory(
                 container.geminiClient
             ) as T
             modelClass.isAssignableFrom(PermissionsViewModel::class.java) -> PermissionsViewModel(
-                container.permissionManager
+                container.permissionManager,
+                container.settingsRepository
             ) as T
             else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }

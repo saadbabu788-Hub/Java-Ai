@@ -18,7 +18,7 @@ class InstalledAppsHelper(private val context: Context) {
         return resolveInfos
             .mapNotNull { info ->
                 val pkg = info.activityInfo?.packageName ?: return@mapNotNull null
-                val label = info.loadLabel(pm)?.toString()?.trim().orEmpty()
+                val label = info.loadLabel(pm).toString().trim()
                 if (label.isBlank() || pkg == context.packageName) return@mapNotNull null
                 InstalledAppInfo(appName = label, packageName = pkg)
             }
@@ -80,12 +80,12 @@ class InstalledAppsHelper(private val context: Context) {
     }
 
     fun openUrl(url: String): LaunchResult {
-        val normalized = if (url.startsWith("http://") || url.startsWith("https://")) {
-            url
-        } else {
-            "https://$url"
+        val normalized = validateAndNormalizeHttpsUrl(url)
+            ?: return LaunchResult.Failed("Blocked unsafe or non-HTTPS URL.")
+
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(normalized)).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
         }
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(normalized))
         return startActivitySafe(intent, normalized)
     }
 
@@ -105,6 +105,62 @@ class InstalledAppsHelper(private val context: Context) {
     }
 
     companion object {
+        fun validateAndNormalizeHttpsUrl(rawUrl: String): String? {
+            val trimmed = rawUrl.trim()
+            if (trimmed.isEmpty() || trimmed.any { it.isWhitespace() || it.isISOControl() }) {
+                return null
+            }
+            val lower = trimmed.lowercase()
+            if (lower.startsWith("http://") ||
+                lower.startsWith("javascript:") ||
+                lower.startsWith("file:") ||
+                lower.startsWith("content:") ||
+                lower.startsWith("data:") ||
+                lower.startsWith("intent:") ||
+                lower.startsWith("tel:") ||
+                lower.startsWith("sms:") ||
+                lower.startsWith("mailto:")
+            ) {
+                return null
+            }
+
+            val candidate = if (lower.startsWith("https://")) {
+                trimmed
+            } else if (!trimmed.contains("://") && !trimmed.contains(":")) {
+                "https://$trimmed"
+            } else {
+                return null
+            }
+
+            val parsed = runCatching { java.net.URI(candidate) }.getOrNull() ?: return null
+            if (!parsed.scheme.equals("https", ignoreCase = true)) return null
+            if (!parsed.rawUserInfo.isNullOrEmpty()) return null
+            val host = parsed.host?.trim()?.lowercase() ?: return null
+            if (host.isEmpty() || !host.contains('.')) return null
+            if (isDisallowedHost(host)) return null
+
+            return candidate
+        }
+
+        private fun isDisallowedHost(host: String): Boolean {
+            if (host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1") {
+                return true
+            }
+            if (host.startsWith("10.") ||
+                host.startsWith("192.168.") ||
+                host.startsWith("169.254.") ||
+                host.endsWith(".local")
+            ) {
+                return true
+            }
+            val parts = host.split('.')
+            if (parts.size == 4 && parts[0] == "172") {
+                val second = parts[1].toIntOrNull()
+                if (second != null && second in 16..31) return true
+            }
+            return false
+        }
+
         private val KNOWN_ALIASES = mapOf(
             "youtube" to "com.google.android.youtube",
             "chrome" to "com.android.chrome",

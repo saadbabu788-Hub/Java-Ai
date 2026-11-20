@@ -38,6 +38,23 @@ object SafetyGuard {
             decision.inputText
         ).joinToString(" ").lowercase()
 
+        // 0. Strictly block protected screens (lockscreen, permission prompts, package installer, password managers)
+        if (snapshot?.isProtectedScreen == true) {
+            return SafetyCheckResult.Blocked(
+                "Blocked for your security: AuraPilot never reads or automates protected security, credential, or permission screens."
+            )
+        }
+
+        // 0b. Strictly block unsafe/non-HTTPS URLs
+        if (decision.action == ActionType.OPEN_URL) {
+            val rawUrl = decision.url.orEmpty()
+            if (InstalledAppsHelper.validateAndNormalizeHttpsUrl(rawUrl) == null) {
+                return SafetyCheckResult.Blocked(
+                    "Blocked for your security: Only valid public HTTPS URLs can be opened."
+                )
+            }
+        }
+
         // 1. Strictly block password / authentication tampering
         if (targetNode?.isPassword == true ||
             (decision.action == ActionType.TYPE_TEXT && authKeywords.any { targetLabel.contains(it) })

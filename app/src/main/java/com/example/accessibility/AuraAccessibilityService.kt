@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -19,7 +20,6 @@ class AuraAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         AccessibilityBridge.attachService(this)
-        captureFreshSnapshot()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -27,6 +27,25 @@ class AuraAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             lastWindowClass = event.className?.toString().orEmpty()
         }
+
+        // Strict privacy rule: never inspect or cache UI trees when no user command is running.
+        if (!AccessibilityBridge.isAutomationActive.value) return
+
+        val eventPkg = event.packageName?.toString().orEmpty()
+        if (ScreenHierarchyParser.isSensitiveScreen(eventPkg, lastWindowClass)) {
+            AccessibilityBridge.updateSnapshot(
+                ScreenSnapshot(
+                    packageName = eventPkg,
+                    className = lastWindowClass,
+                    timestamp = System.currentTimeMillis(),
+                    nodes = emptyList(),
+                    visibleTextLines = emptyList(),
+                    isProtectedScreen = true
+                )
+            )
+            return
+        }
+
         val root = rootInActiveWindow ?: return
         try {
             val snapshot = ScreenHierarchyParser.parse(root, lastWindowClass)
@@ -38,7 +57,7 @@ class AuraAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        AccessibilityBridge.setInspecting(false)
+        AccessibilityBridge.setAutomationActive(false)
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -52,6 +71,7 @@ class AuraAccessibilityService : AccessibilityService() {
     }
 
     fun captureFreshSnapshot(): ScreenSnapshot? {
+        if (!AccessibilityBridge.isAutomationActive.value) return null
         AccessibilityBridge.setInspecting(true)
         return try {
             val root = rootInActiveWindow ?: return AccessibilityBridge.latestSnapshot.value
@@ -69,21 +89,45 @@ class AuraAccessibilityService : AccessibilityService() {
     }
 
     suspend fun tapNodeByIndex(nodeIndex: Int): Boolean {
+        if (!AccessibilityBridge.isAutomationActive.value) return false
         val snapshot = captureFreshSnapshot() ?: return false
+        if (snapshot.isProtectedScreen) return false
         val target = snapshot.nodes.getOrNull(nodeIndex) ?: return false
+        if (target.isPassword) return false
 
         val root = rootInActiveWindow
         if (root != null) {
             try {
                 val matchedNode = findNodeAtBounds(root, target.bounds)
                 if (matchedNode != null) {
-                    var current: AccessibilityNodeInfo? = matchedNode
-                    while (current != null) {
-                        if (current.isClickable) {
-                            val clicked = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            if (clicked) return true
+                    try {
+                        if (matchedNode.isClickable) {
+                            if (matchedNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                                return true
+                            }
                         }
-                        current = current.parent
+                        var parent = matchedNode.parent
+                        while (parent != null) {
+                            val nextParent = parent.parent
+                            val clicked = if (parent.isClickable) {
+                                parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            } else {
+                                false
+                            }
+                            @Suppress("DEPRECATION")
+                            parent.recycle()
+                            if (clicked) {
+                                @Suppress("DEPRECATION")
+                                nextParent?.recycle()
+                                return true
+                            }
+                            parent = nextParent
+                        }
+                    } finally {
+                        if (matchedNode !== root) {
+                            @Suppress("DEPRECATION")
+                            matchedNode.recycle()
+                        }
                     }
                 }
             } finally {
@@ -95,9 +139,11 @@ class AuraAccessibilityService : AccessibilityService() {
     }
 
     suspend fun tapByTextOrDescription(query: String): Boolean {
+        if (!AccessibilityBridge.isAutomationActive.value) return false
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return false
         val snapshot = captureFreshSnapshot() ?: return false
+        if (snapshot.isProtectedScreen) return false
 
         val exactOrPartial = snapshot.nodes.firstOrNull {
             !it.isPassword && (
@@ -119,7 +165,10 @@ class AuraAccessibilityService : AccessibilityService() {
         text: String,
         submitAfter: Boolean
     ): Boolean {
+        if (!AccessibilityBridge.isAutomationActive.value) return false
         val snapshot = captureFreshSnapshot() ?: return false
+        if (snapshot.isProtectedScreen) return false
+
         val targetNode = if (nodeIndex != null) {
             snapshot.nodes.getOrNull(nodeIndex)
         } else {
@@ -127,29 +176,45 @@ class AuraAccessibilityService : AccessibilityService() {
                 ?: snapshot.nodes.firstOrNull { it.isEditable }
         } ?: return false
 
-        if (targetNode.isPassword) {
-            // Security guard: never automate password fields
-            return false
-        }
+        if (targetNode.isPassword) return false
 
         val root = rootInActiveWindow ?: return false
         var textEntered = false
         try {
             val editable = findEditableNearBounds(root, targetNode.bounds)
-            if (editable != null && !editable.isPassword) {
-                editable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                editable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                val args = Bundle().apply {
-                    putCharSequence(
-                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                        text
+            if (editable != null) {
+                try {
+                    val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        editable.hintText?.toString().orEmpty()
+                    } else {
+                        ""
+                    }
+                    val isSensitive = ScreenHierarchyParser.isSensitiveFieldMetadata(
+                        editable.isPassword,
+                        editable.viewIdResourceName.orEmpty(),
+                        hint
                     )
-                }
-                textEntered = editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-                if (textEntered && submitAfter) {
-                    editable.performAction(AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY)
-                    val imeActionId = AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
-                    editable.performAction(imeActionId)
+                    if (!isSensitive) {
+                        editable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                        editable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        val args = Bundle().apply {
+                            putCharSequence(
+                                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                                text
+                            )
+                        }
+                        textEntered = editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                        if (textEntered && submitAfter) {
+                            editable.performAction(AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY)
+                            val imeActionId = AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                            editable.performAction(imeActionId)
+                        }
+                    }
+                } finally {
+                    if (editable !== root) {
+                        @Suppress("DEPRECATION")
+                        editable.recycle()
+                    }
                 }
             }
         } finally {
@@ -158,9 +223,8 @@ class AuraAccessibilityService : AccessibilityService() {
         }
 
         if (textEntered && submitAfter) {
-            // If IME_ENTER didn't submit, try tapping a visible Search/Go/Submit icon if present
             val refreshed = captureFreshSnapshot()
-            val searchBtn = refreshed?.nodes?.firstOrNull {
+            val searchBtn = refreshed?.takeIf { !it.isProtectedScreen }?.nodes?.firstOrNull {
                 it.isClickable && !it.isEditable && (
                     it.contentDescription.contains("search", ignoreCase = true) ||
                         it.text.equals("Search", ignoreCase = true) ||
@@ -177,17 +241,32 @@ class AuraAccessibilityService : AccessibilityService() {
     }
 
     suspend fun scrollScreen(scrollDown: Boolean): Boolean {
+        if (!AccessibilityBridge.isAutomationActive.value) return false
         val root = rootInActiveWindow
         if (root != null) {
             try {
+                if (ScreenHierarchyParser.isSensitiveScreen(
+                        root.packageName?.toString().orEmpty(),
+                        lastWindowClass
+                    )
+                ) {
+                    return false
+                }
                 val scrollable = findFirstScrollable(root)
                 if (scrollable != null) {
-                    val action = if (scrollDown) {
-                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-                    } else {
-                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    try {
+                        val action = if (scrollDown) {
+                            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                        } else {
+                            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                        }
+                        if (scrollable.performAction(action)) return true
+                    } finally {
+                        if (scrollable !== root) {
+                            @Suppress("DEPRECATION")
+                            scrollable.recycle()
+                        }
                     }
-                    if (scrollable.performAction(action)) return true
                 }
             } finally {
                 @Suppress("DEPRECATION")
@@ -202,11 +281,18 @@ class AuraAccessibilityService : AccessibilityService() {
         return performSwipe(x, startY, x, endY, 320L)
     }
 
-    fun performBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
+    fun performBack(): Boolean {
+        if (!AccessibilityBridge.isAutomationActive.value) return false
+        return performGlobalAction(GLOBAL_ACTION_BACK)
+    }
 
-    fun performHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
+    fun performHome(): Boolean {
+        if (!AccessibilityBridge.isAutomationActive.value) return false
+        return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
 
     suspend fun tapCoordinates(x: Float, y: Float): Boolean {
+        if (!AccessibilityBridge.isAutomationActive.value) return false
         if (x < 0f || y < 0f) return false
         val path = Path().apply { moveTo(x, y) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 60L)
@@ -265,7 +351,15 @@ class AuraAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val match = findNodeAtBounds(child, target)
-            if (match != null) return match
+            if (match != null) {
+                if (match !== child) {
+                    @Suppress("DEPRECATION")
+                    child.recycle()
+                }
+                return match
+            }
+            @Suppress("DEPRECATION")
+            child.recycle()
         }
         return null
     }
@@ -286,7 +380,15 @@ class AuraAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val match = findEditableNearBounds(child, target)
-            if (match != null) return match
+            if (match != null) {
+                if (match !== child) {
+                    @Suppress("DEPRECATION")
+                    child.recycle()
+                }
+                return match
+            }
+            @Suppress("DEPRECATION")
+            child.recycle()
         }
         return null
     }
@@ -296,7 +398,15 @@ class AuraAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findFirstScrollable(child)
-            if (found != null) return found
+            if (found != null) {
+                if (found !== child) {
+                    @Suppress("DEPRECATION")
+                    child.recycle()
+                }
+                return found
+            }
+            @Suppress("DEPRECATION")
+            child.recycle()
         }
         return null
     }

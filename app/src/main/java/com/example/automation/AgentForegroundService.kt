@@ -32,8 +32,11 @@ class AgentForegroundService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                val statusText = intent?.getStringExtra(EXTRA_STATUS_TEXT)
-                    ?: "AuraPilot AI operator is running..."
+                val statusText = (intent?.getStringExtra(EXTRA_STATUS_TEXT)
+                    ?: "AuraPilot AI operator is running...")
+                    .replace(Regex("[\\r\\n]+"), " ")
+                    .trim()
+                    .take(120)
                 val notification = buildNotification(statusText)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(

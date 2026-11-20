@@ -30,9 +30,13 @@ data class ScreenSnapshot(
     val className: String,
     val timestamp: Long,
     val nodes: List<ScreenNode>,
-    val visibleTextLines: List<String>
+    val visibleTextLines: List<String>,
+    val isProtectedScreen: Boolean = false
 ) {
     fun toPromptText(): String {
+        if (isProtectedScreen) {
+            return "package=$packageName | PROTECTED_SENSITIVE_SCREEN=true (Content redacted for user privacy and security.)"
+        }
         val sb = StringBuilder()
         sb.appendLine("package=$packageName | window=$className | total_interactive_nodes=${nodes.size}")
         sb.appendLine("NODES:")
@@ -65,6 +69,7 @@ data class ScreenSnapshot(
     }
 
     fun fullReadableText(): String {
+        if (isProtectedScreen) return ""
         return visibleTextLines.joinToString("\n").ifBlank {
             nodes.filter { !it.isPassword }
                 .mapNotNull { it.text.ifBlank { it.contentDescription }.takeIf { s -> s.isNotBlank() } }
