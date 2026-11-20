@@ -1,0 +1,6 @@
+{
+  "name": "AuraPilot",
+  "description": "Native Android AI phone operator powered by Google Gemini, Accessibility Service automation, and bilingual voice control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
