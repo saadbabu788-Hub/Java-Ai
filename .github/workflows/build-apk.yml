@@ -51,11 +51,73 @@ jobs:
           fi
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK_ROOT" ]; then
+            SDK_ROOT="${HOME}/android-sdk"
+          fi
+          mkdir -p "$SDK_ROOT"
+          if [ ! -w "$SDK_ROOT" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$SDK_ROOT" || SDK_ROOT="${HOME}/android-sdk"
+            mkdir -p "$SDK_ROOT"
+          fi
+
+          SDKMANAGER=""
+          for candidate in \
+            "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager; do
+            if [ -x "$candidate" ]; then
+              SDKMANAGER="$candidate"
+              break
+            fi
+          done
+          if [ -z "$SDKMANAGER" ] && command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android cmdline-tools not found; downloading official commandlinetools..."
+            if ! command -v unzip >/dev/null 2>&1; then
+              sudo apt-get update && sudo apt-get install -y unzip
+            fi
+            TMP_TOOLS="$(mktemp -d "${RUNNER_TEMP:-/tmp}/cmdline-tools-XXXXXX")"
+            curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o "$TMP_TOOLS/cmdline-tools.zip"
+            unzip -q "$TMP_TOOLS/cmdline-tools.zip" -d "$TMP_TOOLS"
+            mkdir -p "$SDK_ROOT/cmdline-tools"
+            rm -rf "$SDK_ROOT/cmdline-tools/latest"
+            mv "$TMP_TOOLS/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+            rm -rf "$TMP_TOOLS"
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager executable not found at $SDKMANAGER"
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
+            "platform-tools" \
+            "platforms;android-36.1" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+          if [ ! -d "$SDK_ROOT/platforms/android-36.1" ] && [ ! -d "$SDK_ROOT/platforms/android-36" ]; then
+            echo "ERROR: Required Android 36 SDK platform failed to install under $SDK_ROOT/platforms."
+            exit 1
+          fi
+          echo "Configured ANDROID_HOME=$SDK_ROOT"
 
       - name: Accept Android SDK licenses
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
+          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          ls -la "$ANDROID_HOME/licenses"
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
